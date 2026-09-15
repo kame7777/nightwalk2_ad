@@ -1,0 +1,17 @@
+streamlit
+osmnx>=1.6.0
+folium
+streamlit-folium
+networkx
+shapely
+pyproj
+geopandas
+pandas
+bcrypt
+scipy
+
+
+
+requests
+
+osmium
