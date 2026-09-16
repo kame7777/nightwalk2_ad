@@ -503,9 +503,51 @@ st.markdown(
 
 route_mode = st.radio("検索モード", ("最短ルート", "安全ルート"), index=1)
 
-origin = st.text_input("出発地", "大宮駅, 埼玉")
-destination = st.text_input("目的地", "さいたま新都心駅, 埼玉")
-place = st.text_input("検索エリア", "さいたま市, 埼玉, Japan")
+# --- TGS体験用 出発地選択 ---
+origin_options = {
+    "大宮公園": "大宮公園, 埼玉県さいたま市",
+    "北大宮駅": "北大宮駅, 埼玉県さいたま市",
+    "鉄道博物館駅": "鉄道博物館駅, 埼玉県さいたま市",
+    "さいたま新都心駅": "さいたま新都心駅, 埼玉県さいたま市",
+    "自分で入力する": None,
+}
+
+origin_choice = st.selectbox(
+    "出発地",
+    list(origin_options.keys())
+)
+
+if origin_choice == "自分で入力する":
+    origin = st.text_input(
+        "出発地を入力",
+        placeholder="例：与野駅, 埼玉県さいたま市"
+    )
+else:
+    origin = origin_options[origin_choice]
+
+
+# --- TGS体験用 目的地選択 ---
+destination_options = {
+    "大宮駅": "大宮駅, 埼玉県さいたま市",
+    "自分で入力する": None,
+}
+
+destination_choice = st.selectbox(
+    "目的地",
+    list(destination_options.keys())
+)
+
+if destination_choice == "自分で入力する":
+    destination = st.text_input(
+        "目的地を入力",
+        placeholder="例：浦和駅, 埼玉県さいたま市"
+    )
+else:
+    destination = destination_options[destination_choice]
+
+
+# 検索エリア
+place = "さいたま市, 埼玉, Japan"
 zoom = st.slider("地図のズーム", 13, 18, 15)
 
 
