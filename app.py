@@ -17,7 +17,6 @@ from shapely.geometry import LineString
 from pathlib import Path
 from utils import geocode_cached, detect_polarity
 from poi_db import query_bbox, count_pois
-from pyproj import Transformer, CRS
 
 
 
@@ -45,55 +44,37 @@ render_sidebar()
 
 
 
-
-
-def safe_graph_from_place(orig_latlon, dest_latlon):
-    """出発地と目的地を含む範囲の歩行者道路グラフを取得・保存する。"""
+def safe_graph_from_place(place):
+    """道路グラフは毎回OSMから取得せず、data/graphs/ に保存したものを再利用する。"""
     import osmnx as ox
 
     graph_dir = Path("data/graphs")
     graph_dir.mkdir(parents=True, exist_ok=True)
-
-    # 出発地と目的地を囲む範囲を作成
-    margin = 0.015
-    north = max(orig_latlon[0], dest_latlon[0]) + margin
-    south = min(orig_latlon[0], dest_latlon[0]) - margin
-    east = max(orig_latlon[1], dest_latlon[1]) + margin
-    west = min(orig_latlon[1], dest_latlon[1]) - margin
-
-    # 範囲ごとにキャッシュを保存
-    cache_key = (
-        f"{south:.4f}_{west:.4f}_"
-        f"{north:.4f}_{east:.4f}"
-    )
-    graph_path = graph_dir / f"route_{cache_key}_walk.graphml"
+    safe = "".join(c if c.isalnum() else "_" for c in place).strip("_")
+    graph_path = graph_dir / f"{safe}_walk.graphml"
 
     if graph_path.exists():
-        st.info("保存済みの道路グラフを読み込み中...")
         return ox.load_graphml(graph_path)
 
-    st.info("必要な範囲の道路グラフを取得中...")
+    # 初回だけオンライン取得。以後はGraphMLを使う。
+    try:
+        G = ox.graph_from_place(place, network_type="walk")
+    except Exception:
+        geocode = ox.geocode_to_gdf(place)
+        west, south, east, north = geocode.total_bounds
+        G = ox.graph_from_bbox(north, south, east, west, network_type="walk")
 
-    # OSMnxのバージョンによって引数形式を切り替える
-    major_version = int(ox.__version__.split(".")[0])
-
-    if major_version >= 2:
-        G = ox.graph_from_bbox(
-            (west, south, east, north),
-            network_type="walk"
-        )
-    else:
-        G = ox.graph_from_bbox(
-            north, south, east, west,
-            network_type="walk"
-        )
-
-    if len(G.nodes) == 0:
-        raise ValueError("指定範囲に道路グラフがありません。")
-
-    ox.save_graphml(G, graph_path)
+    try:
+        ox.save_graphml(G, graph_path)
+    except Exception:
+        # 保存できなくても、その検索自体は継続する
+        pass
     return G
-
+# pyproj を使って緯度経度 -> 投影座標に変換する
+try:
+    from pyproj import Transformer, CRS
+except Exception:
+    Transformer = None
 
 # -----------------------
 # --- データベース設定 ---
@@ -522,11 +503,8 @@ st.markdown(
 
 route_mode = st.radio("検索モード", ("最短ルート", "安全ルート"), index=1)
 
-# --- 出発地選択（GPS対応） ---
-from streamlit_geolocation import streamlit_geolocation
-
+# --- TGS体験用 出発地選択 ---
 origin_options = {
-    "現在地（GPS）": None,
     "大宮公園": "大宮公園, 埼玉県さいたま市",
     "北大宮駅": "北大宮駅, 埼玉県さいたま市",
     "鉄道博物館駅": "鉄道博物館駅, 埼玉県さいたま市",
@@ -539,31 +517,13 @@ origin_choice = st.selectbox(
     list(origin_options.keys())
 )
 
-gps_location = None
-origin = origin_options[origin_choice]
-
-if origin_choice == "現在地（GPS）":
-    st.caption("ブラウザの位置情報利用を許可してください。")
-    gps_location = streamlit_geolocation()
-
-    if (
-        gps_location
-        and gps_location.get("latitude") is not None
-        and gps_location.get("longitude") is not None
-    ):
-        st.success("現在地を取得しました")
-        st.caption(
-            f"緯度: {gps_location['latitude']:.6f}, "
-            f"経度: {gps_location['longitude']:.6f}"
-        )
-    else:
-        st.info("現在地を取得中です。位置情報の許可を確認してください。")
-
-elif origin_choice == "自分で入力する":
+if origin_choice == "自分で入力する":
     origin = st.text_input(
         "出発地を入力",
         placeholder="例：与野駅, 埼玉県さいたま市"
     )
+else:
+    origin = origin_options[origin_choice]
 
 
 # --- TGS体験用 目的地選択 ---
@@ -587,7 +547,7 @@ else:
 
 
 # 検索エリア
-place = "さいたま市, 埼玉県, 日本"
+place = "さいたま市, 埼玉, Japan"
 zoom = st.slider("地図のズーム", 13, 18, 15)
 
 
@@ -598,78 +558,45 @@ if st.button("ルートを検索"):
         st.error("pyproj が必要です。 `pip install pyproj` を実行してください。")
         st.stop()
 
-    if not destination:
-        st.warning("目的地を確認してください。")
+    if not all([origin, destination, place]):
+        st.warning("出発地、目的地、エリアをすべて入力してください。")
         st.stop()
 
-    if origin_choice == "現在地（GPS）":
-        if not gps_location or gps_location.get("latitude") is None or gps_location.get("longitude") is None:
-            st.warning("現在地を取得できませんでした。位置情報を許可するか、別の出発地を選択してください。")
-            st.stop()
-    elif not origin:
-        st.warning("出発地を入力してください。")
-        st.stop()
-
-    
     try:
-        # --- 出発地・目的地の座標取得 ---
-        st.info("出発地・目的地の座標を取得しています...")
+        # --- データ準備 ---
+        st.info("OSM グラフと犯罪データを準備しています...")
 
-        try:
-            if origin_choice == "現在地（GPS）":
-                orig_latlon = (
-                    float(gps_location["latitude"]),
-                    float(gps_location["longitude"])
-                )
-            else:
-                orig_latlon = geocode_cached(origin)
+        # 安全版 graph_from_place
+        G = safe_graph_from_place(place)
 
-            dest_latlon = geocode_cached(destination)
-
-        except Exception as e:
-            st.error(f"座標取得エラー: {e}")
-            st.stop()
-
-        st.write("出発地座標:", orig_latlon)
-        st.write("目的地座標:", dest_latlon)
-
-        # --- 道路グラフの取得 ---
-        st.info("道路グラフを準備しています...")
-        G = safe_graph_from_place(orig_latlon, dest_latlon)
-        st.success(f"道路グラフ取得完了：ノード数 {len(G.nodes):,}")
-
-        # --- 犯罪データの読み込み ---
-        st.info("犯罪データを読み込み中...")
         crime_locations = load_crime_data("data/")
-        st.success("犯罪データの読み込み完了")
+
+
 
         # --- 座標変換 ---
+        try:
+            orig_latlon = geocode_cached(origin)
+            dest_latlon = geocode_cached(destination)
+        except Exception as e:
+            st.error(f"住所変換エラー: {e}")
+            st.stop()
+
         G_proj = ox.project_graph(G)
         crs_proj = G_proj.graph.get("crs", "EPSG:3857")
         target_crs = CRS.from_user_input(crs_proj)
-        transformer = Transformer.from_crs(
-            "EPSG:4326", target_crs, always_xy=True
-        )
+        transformer = Transformer.from_crs("EPSG:4326", target_crs, always_xy=True)
 
-        orig_x, orig_y = transformer.transform(
-            orig_latlon[1], orig_latlon[0]
-        )
-        dest_x, dest_y = transformer.transform(
-            dest_latlon[1], dest_latlon[0]
-        )
+        orig_x, orig_y = transformer.transform(orig_latlon[1], orig_latlon[0])
+        dest_x, dest_y = transformer.transform(dest_latlon[1], dest_latlon[0])
 
-        orig_node = ox.distance.nearest_nodes(
-            G_proj, orig_x, orig_y
-        )
-        dest_node = ox.distance.nearest_nodes(
-            G_proj, dest_x, dest_y
-        )
+        orig_node = ox.distance.nearest_nodes(G_proj, orig_x, orig_y)
+        dest_node = ox.distance.nearest_nodes(G_proj, dest_x, dest_y)
 
         # --- ルート計算 ---
         st.info("ルートを計算しています...")
-        route = nx.shortest_path(
-            G_proj, orig_node, dest_node, weight="length"
-        )
+
+        weight = "length"
+        route = nx.shortest_path(G_proj, orig_node, dest_node, weight=weight)
 
         # --- ルートのbbox（±300mの余白つき） ---
         xs = []
